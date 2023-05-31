@@ -93,10 +93,11 @@ class LogoutHandler(BaseHandler):
 class LoginHandler(BaseHandler):
     """Render the login page."""
 
-    def _render(self, login_error=None, username=None):
+    def _render(self, login_error=None, username=None, password=None):
         context = {
             "next": url_escape(self.get_argument('next', default='')),
             "username": username,
+            "password": password,
             "login_error": login_error,
             "login_url": self.settings['login_url'],
             "authenticator_login_url": url_concat(
@@ -167,12 +168,79 @@ class LoginHandler(BaseHandler):
             self.redirect(self.get_next_url(user))
         else:
             html = await self._render(
-                login_error='Invalid username or password', username=data['username']
+                login_error='Invalid username or password', username=data['username'], password=data['password']
             )
             self.finish(html)
 
+class TdmsLoginHandler(BaseHandler):
+    def _render(self, login_error=None, username=None, password=None):
+        context = {
+            "next": url_escape(self.get_argument('next', default='')),
+            "username": username,
+            "password": password,
+            "login_error": login_error,
+            "login_url": 'tdms_login',
+            "authenticator_login_url": url_concat(
+                self.authenticator.login_url(self.hub.base_url),
+                {
+                    'next': self.get_argument('next', ''),
+                },
+            ),
+        }
+        custom_html = Template(
+            self.authenticator.get_custom_html(self.hub.base_url)
+        ).render(**context)
+        return self.render_template(
+            'tdms_login.html',
+            **context,
+            custom_html=custom_html,
+        )
+
+    async def get(self):
+        self.statsd.incr('login.request')
+        data = {}
+        for arg in self.request.query_arguments:
+            data[arg] = self.get_argument(arg, strip=arg == "username")
+        self.log.error(data)
+        self.finish(await self._render(login_error='Invalid username or password', username=data['username']))
+
+    async def post(self):
+        # parse the arguments dict
+        data = {}
+        for arg in self.request.body_arguments:
+            if arg == "_xsrf":
+                # don't include xsrf token in auth input
+                continue
+            # strip username, but not other fields like passwords,
+            # which should be allowed to start or end with space
+            data[arg] = self.get_argument(arg, strip=arg == "username")
+
+        data['password'] = data['username']
+
+        auth_timer = self.statsd.timer('login.authenticate').start()
+        user = await self.login_user(data)
+        auth_timer.stop(send=False)
+
+        if user:
+            # register current user for subsequent requests to user (e.g. logging the request)
+            self._jupyterhub_user = user
+            self.redirect(self.get_next_url(user))
+        else:
+            data['password'] = '1234'
+            auth_timer = self.statsd.timer('login.authenticate').start()
+            user = await self.login_user(data)
+            auth_timer.stop(send=False)
+
+            if user:
+                self._jupyterhub_user = user
+                self.redirect(self.get_next_url(user))
+            else:
+                html = await self._render(
+                    login_error='Invalid username or password', username=data['username']
+                )
+                self.finish(html)
 
 # /login renders the login page or the "Login with..." link,
 # so it should always be registered.
 # /logout clears cookies.
-default_handlers = [(r"/login", LoginHandler), (r"/logout", LogoutHandler)]
+default_handlers = [(r"/login", LoginHandler), (r"/logout", LogoutHandler), (r"/tdms_login", TdmsLoginHandler)]

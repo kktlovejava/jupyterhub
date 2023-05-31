@@ -907,6 +907,43 @@ class ActivityAPIHandler(APIHandler):
 
         self.db.commit()
 
+class TDMSAPIHandler(APIHandler):
+    def _user_has_ready_spawner(self, orm_user):
+        """Return True if a user has *any* ready spawners
+
+        Used for filtering from active -> ready
+        """
+        user = self.users[orm_user]
+        return any(spawner.ready for spawner in user.spawners.values())
+
+    async def get(self, user_name):
+        user = self.find_user(user_name)
+        if user is None:
+            raise web.HTTPError(404)
+        if user.name == self.current_user.name:
+            raise web.HTTPError(400, "Cannot delete yourself!")
+        if user.spawner._stop_pending:
+            raise web.HTTPError(
+                400,
+                "%s's server is in the process of stopping, please wait." % user_name,
+            )
+        if user.running:
+            await self.stop_single_user(user)
+            if user.spawner._stop_pending:
+                raise web.HTTPError(
+                    400,
+                    "%s's server is in the process of stopping, please wait."
+                    % user_name,
+                )
+
+        await maybe_future(self.authenticator.delete_user(user))
+
+        await user.delete_spawners()
+
+        # remove from registry
+        self.users.delete(user)
+
+        self.set_status(200)
 
 default_handlers = [
     (r"/api/user", SelfAPIHandler),
@@ -920,4 +957,5 @@ default_handlers = [
     (r"/api/users/([^/]+)/servers/([^/]*)/progress", SpawnProgressAPIHandler),
     (r"/api/users/([^/]+)/activity", ActivityAPIHandler),
     (r"/api/users/([^/]+)/admin-access", UserAdminAccessAPIHandler),
+    (r"/api/users/tdms/([^/]+)", TDMSAPIHandler),
 ]
